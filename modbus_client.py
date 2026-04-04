@@ -10,7 +10,8 @@ Modbus Client GUI - Аналог Modbus Poll
 
 import sys
 import threading
-from typing import Optional, List, Tuple, Any
+import serial.tools.list_ports
+from typing import Optional, List, Any
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -22,8 +23,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QObject
 from pymodbus.client import ModbusTcpClient, ModbusSerialClient
-from pymodbus.constants import Endian
-from pymodbus.payload import BinaryPayloadDecoder
 from pymodbus.exceptions import ModbusException, ConnectionException
 
 
@@ -43,7 +42,7 @@ class ModbusConfig:
     port: int = 502
     
     # RTU параметры
-    serial_port: str = "/dev/ttyUSB0"
+    serial_port: str = "COM1"
     baudrate: int = 9600
     parity: str = 'N'
     stopbits: int = 1
@@ -251,44 +250,48 @@ class ModbusClientApp(QMainWindow):
     def _create_connection_group(self) -> QGroupBox:
         """Создать группу настроек подключения"""
         group = QGroupBox("Настройки подключения")
-        layout = QFormLayout()
+        layout = QVBoxLayout()
         
         # Тип подключения
+        type_layout = QHBoxLayout()
         self.tcp_radio = QRadioButton("Modbus TCP")
         self.tcp_radio.setChecked(True)
         self.rtu_radio = QRadioButton("Modbus RTU (Serial)")
         
-        type_layout = QHBoxLayout()
         type_layout.addWidget(self.tcp_radio)
         type_layout.addWidget(self.rtu_radio)
         self.type_group = QButtonGroup()
         self.type_group.addButton(self.tcp_radio)
         self.type_group.addButton(self.rtu_radio)
         
-        layout.addRow(type_layout)
+        layout.addLayout(type_layout)
+        
+        # Контейнер для динамических полей
+        self.connection_fields_widget = QWidget()
+        fields_layout = QFormLayout(self.connection_fields_widget)
         
         # Параметры TCP
         self.host_input = QLineEdit("127.0.0.1")
         self.host_input.setPlaceholderText("IP адрес")
-        layout.addRow("Host:", self.host_input)
+        fields_layout.addRow("Host:", self.host_input)
         
         self.port_input = QSpinBox()
         self.port_input.setRange(1, 65535)
         self.port_input.setValue(502)
-        layout.addRow("Port:", self.port_input)
+        fields_layout.addRow("Port:", self.port_input)
         
         # Параметры RTU
         self.serial_port_input = QComboBox()
-        self.serial_port_input.addItems([
-            "/dev/ttyUSB0", "/dev/ttyS0", "COM1", "COM2"
-        ])
         self.serial_port_input.setEditable(True)
-        layout.addRow("Serial Port:", self.serial_port_input)
+        self._update_serial_ports()
+        fields_layout.addRow("COM порт:", self.serial_port_input)
         
         self.baud_rate_input = QSpinBox()
         self.baud_rate_input.setRange(1200, 115200)
         self.baud_rate_input.setValue(9600)
-        layout.addRow("Baud Rate:", self.baud_rate_input)
+        fields_layout.addRow("Скорость (Baud):", self.baud_rate_input)
+        
+        layout.addWidget(self.connection_fields_widget)
         
         # Общие параметры
         self.slave_id_input = QSpinBox()
@@ -300,7 +303,13 @@ class ModbusClientApp(QMainWindow):
         self.poll_interval_input.setRange(100, 10000)
         self.poll_interval_input.setValue(1000)
         self.poll_interval_input.setSuffix(" мс")
-        layout.addRow("Poll Interval:", self.poll_interval_input)
+        layout.addRow("Интервал опроса:", self.poll_interval_input)
+        
+        # Подключение сигналов для переключения режимов
+        self.tcp_radio.toggled.connect(self._on_connection_type_changed)
+        
+        # Инициализация видимости полей
+        self._on_connection_type_changed()
         
         group.setLayout(layout)
         return group
@@ -347,12 +356,12 @@ class ModbusClientApp(QMainWindow):
         self.start_address_input = QSpinBox()
         self.start_address_input.setRange(0, 65535)
         self.start_address_input.setValue(0)
-        layout.addRow("Start Address:", self.start_address_input)
+        layout.addRow("Начальный адрес:", self.start_address_input)
         
         self.quantity_input = QSpinBox()
         self.quantity_input.setRange(1, 125)
         self.quantity_input.setValue(10)
-        layout.addRow("Quantity:", self.quantity_input)
+        layout.addRow("Количество:", self.quantity_input)
         
         group.setLayout(layout)
         return group
@@ -362,10 +371,51 @@ class ModbusClientApp(QMainWindow):
         table = QTableWidget()
         table.setColumnCount(4)
         table.setHorizontalHeaderLabels([
-            "Address", "Value", "Binary", "Hex"
+            "Адрес", "Значение", "Двоичное", "Шестнадцатеричное"
         ])
         table.horizontalHeader().setStretchLastSection(True)
         return table
+    
+    def _update_serial_ports(self) -> None:
+        """Обновить список доступных COM портов"""
+        self.serial_port_input.clear()
+        ports = serial.tools.list_ports.comports()
+        if ports:
+            port_list = [p.device for p in sorted(ports)]
+            self.serial_port_input.addItems(port_list)
+        else:
+            # Если портов не найдено, добавить стандартные варианты
+            self.serial_port_input.addItems(["COM1", "COM2", "COM3", "COM4"])
+    
+    def _on_connection_type_changed(self) -> None:
+        """Обработка изменения типа подключения"""
+        is_tcp = self.tcp_radio.isChecked()
+        
+        # Показываем/скрываем поля TCP
+        self.host_input.setVisible(is_tcp)
+        self.port_input.setVisible(is_tcp)
+        
+        # Показываем/скрываем поля RTU
+        self.serial_port_input.setVisible(not is_tcp)
+        self.baud_rate_input.setVisible(not is_tcp)
+        
+        # Обновляем метки для полей
+        fields_layout = self.connection_fields_widget.layout()
+        if fields_layout:
+            for i in range(fields_layout.rowCount()):
+                label_item = fields_layout.itemAt(i, QFormLayout.LabelRole)
+                field_item = fields_layout.itemAt(i, QFormLayout.FieldRole)
+                
+                if label_item and field_item:
+                    label = label_item.widget()
+                    field = field_item.widget()
+                    
+                    if field == self.host_input or field == self.port_input:
+                        label.setVisible(is_tcp)
+                        field.setVisible(is_tcp)
+                    elif field == self.serial_port_input or field == self.baud_rate_input:
+                        label.setVisible(not is_tcp)
+                        field.setVisible(not is_tcp)
     
     def _connect_signals(self) -> None:
         """Подключить сигналы обработчика"""
